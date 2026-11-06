@@ -1,0 +1,96 @@
+use leptos::prelude::*;
+use serde::{Deserialize, Serialize};
+
+// Модель данных пользователя
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct User {
+    pub id: i64,
+    pub name: String,
+}
+
+// СЕРВЕРНАЯ ФУНКЦИЯ: Получение списка из PostgreSQL
+#[server(GetUsers, "/api")]
+pub async fn get_users() -> Result<Vec<User>, ServerFnError> {
+    let pool = use_context::<sqlx::PgPool>()
+        .ok_or_else(|| ServerFnError::new("Пул базы данных не найден в контексте"))?;
+
+    let users = sqlx::query_as!(User, "SELECT id, name FROM users ORDER BY id DESC")
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(users)
+}
+
+// СЕРВЕРНАЯ ФУНКЦИЯ: Добавление нового пользователя
+#[server(CreateUser, "/api")]
+pub async fn create_user(name: String) -> Result<(), ServerFnError> {
+    let pool = use_context::<sqlx::PgPool>()
+        .ok_or_else(|| ServerFnError::new("Пул базы данных не найден в контексте"))?;
+
+    sqlx::query!("INSERT INTO users (name) VALUES ($1)", name)
+        .execute(&pool)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(())
+}
+
+// Главный UI-компонент приложения
+#[component]
+pub fn App() -> impl IntoView {
+    let add_user = ServerAction::<CreateUser>::new();
+
+    // Ресурс для реактивной загрузки данных с сервера
+    let users_resource = Resource::new(
+        move || add_user.version().get(),
+        |_| async move { get_users().await }
+    );
+
+    view! {
+        <main style="padding: 30px; font-family: sans-serif; max-width: 600px; margin: auto;">
+            <h1>"Управление пользователями (Axum + Leptos)"</h1>
+
+            <ActionForm action=add_user>
+                <fieldset style="border: none; padding: 0; margin-bottom: 20px;">
+                    <input 
+                        type="text" 
+                        name="name" 
+                        placeholder="Имя нового пользователя..." 
+                        required 
+                        style="padding: 8px; width: 70%; margin-right: 8px;"
+                    />
+                    <button type="submit" style="padding: 8px 16px; cursor: pointer;">"Добавить"</button>
+                </fieldset>
+            </ActionForm>
+
+            <h2>"Список из PostgreSQL:"</h2>
+
+            <Suspense fallback=move || view! { <p>"Загрузка данных из БД..."</p> }>
+                {move || {
+                    users_resource.get().map(|result| {
+                        match result {
+                            Ok(users) if users.is_empty() => view! { <p>"Пока нет ни одного пользователя."</p> }.into_any(),
+                            Ok(users) => view! {
+                                <ul style="line-height: 1.8;">
+                                    {users.into_iter().map(|u| view! {
+                                        <li><strong>"ID: " {u.id}</strong>" — " {u.name}</li>
+                                    }).collect::<Vec<_>>()}
+                                </ul>
+                            }.into_any(),
+                            Err(e) => view! { <p style="color: red;">"Ошибка: "{e.to_string()}</p> }.into_any(),
+                        }
+                    })
+                }}
+            </Suspense>
+        </main>
+    }
+}
+
+// Точка входа для клиентской части (WASM), активна только при сборке фронтенда
+#[cfg(feature = "hydrate")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn hydrate() {
+    console_error_panic_hook::set_once();
+    leptos::mount::hydrate_body(App);
+}
